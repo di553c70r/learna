@@ -1,0 +1,192 @@
+%%writefile {DEMO_DIR}/simple_mcp.py
+# simple_mcp.py - Your first MCP server
+
+from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel
+
+# Create an MCP server
+mcp = FastMCP("my-first-mcp")
+
+
+class AddResponse(BaseModel):
+    """Structured response for the add tool."""
+    result: int
+
+
+@mcp.tool()
+def add(a: int, b: int) -> AddResponse:
+    """Add two numbers and return the result."""
+    return AddResponse(result=a + b)
+
+
+@mcp.tool()
+def greet(name: str) -> str:
+    """Greet a user by name."""
+    return f"Hello, {name}!"
+
+
+if __name__ == "__main__":
+    mcp.run()
+
+
+
+
+
+
+
+-------------------------------------------
+
+
+import subprocess, json
+
+# Start our MCP server as a subprocess
+proc = subprocess.Popen(
+    ["python", f"{DEMO_DIR}/simple_mcp.py"],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+)
+
+# Step 1: Initialize the connection (required by the MCP protocol)
+init_request = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2024-11-05",
+        "capabilities": {},
+        "clientInfo": {"name": "notebook-demo", "version": "0.1"},
+    },
+}
+proc.stdin.write(json.dumps(init_request) + "\n")
+proc.stdin.flush()
+init_response = json.loads(proc.stdout.readline())
+print("=== Server Info ===")
+print(json.dumps(init_response["result"]["serverInfo"], indent=2))
+
+# Step 2: Send the initialized notification
+proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+proc.stdin.flush()
+
+# Step 3: Ask for the tool list - this is what an LLM sees
+tools_request = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+proc.stdin.write(json.dumps(tools_request) + "\n")
+proc.stdin.flush()
+tools_response = json.loads(proc.stdout.readline())
+
+print("\n=== Tools (what the LLM sees) ===")
+for tool in tools_response["result"]["tools"]:
+    print(f"\n  Name:        {tool['name']}")
+    print(f"  Description: {tool['description']}")
+    print(f"  Parameters:  {json.dumps(tool['inputSchema']['properties'], indent=2)}")
+
+proc.terminate()
+
+
+
+-------------------------------------------------------
+
+
+%%writefile {DEMO_DIR}/simple_mcp.py
+# simple_mcp.py - MCP server with logging and CWE lookup
+
+import logging
+import sys
+import requests
+
+from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel
+
+# --- Logging Setup (stderr only!) ---
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stderr,
+)
+logger = logging.getLogger("simple_mcp")
+
+# Create an MCP server
+mcp = FastMCP("my-first-mcp")
+logger.info("MCP server instance created")
+
+
+class AddResponse(BaseModel):
+    """Structured response for the add tool."""
+    result: int
+
+
+@mcp.tool()
+def add(a: int, b: int) -> AddResponse:
+    """Add two numbers and return the result."""
+    logger.info(f"add() called with a={a}, b={b}")
+    result = AddResponse(result=a + b)
+    logger.debug(f"add() returning {result}")
+    return result
+
+
+@mcp.tool()
+def greet(name: str) -> str:
+    """Greet a user by name."""
+    logger.info(f"greet() called with name={name!r}")
+    return f"Hello, {name}!"
+
+
+@mcp.tool()
+def lookup_cwe(cwe_id: int) -> dict:
+    """Retrieve details about a CWE weakness from the MITRE CWE API."""
+
+    logger.info(f"lookup_cwe() called with cwe_id={cwe_id}")
+
+    url = f"https://cwe-api.mitre.org/api/v1/cwe/weakness/{cwe_id}"
+    logger.debug(f"Requesting URL: {url}")
+
+    try:
+        response = requests.get(url, timeout=10)
+        logger.debug(f"HTTP status: {response.status_code}")
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        count = len(data.get("Weaknesses", []))
+        logger.info(f"Retrieved {count} weakness record(s) for CWE-{cwe_id}")
+
+        return data
+
+    except requests.exceptions.RequestException as e:
+        logger.exception(f"Failed to retrieve CWE-{cwe_id}")
+        return {
+            "error": f"Unable to retrieve CWE-{cwe_id}",
+            "details": str(e),
+        }
+
+
+if __name__ == "__main__":
+    logger.info("Starting MCP server (stdio transport)")
+    mcp.run()
+
+
+----------------------------------------------------------------
+
+
+
+import requests
+
+BASE_URL = "http://localhost:1339"
+
+# Test the add tool
+response = requests.post(f"{BASE_URL}/add", json={"a": 40, "b": 20})
+print(f"add(40, 20) = {response.json()}")
+
+# Test the greet tool
+response = requests.post(f"{BASE_URL}/greet", json={"name": "Reverse Engineer"})
+print(f"greet('Reverse Engineer') = {response.json()}")
+
+# Check the OpenAPI schema to see how tools are exposed
+schema = requests.get(f"{BASE_URL}/openapi.json").json()
+print(f"\nServer: {schema.get('info', {}).get('title', 'unknown')}")
+print(f"Available endpoints: {list(schema.get('paths', {}).keys())}")
+
+
+---------------------------------------------------
